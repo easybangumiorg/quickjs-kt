@@ -152,4 +152,9 @@ afterEvaluate {
     tasks.named("testReleaseUnitTest").configure {
         enabled = false
     }
+    
+    // Disable signing tasks for local development
+    tasks.matching { it.name.contains("sign", ignoreCase = true) }.configureEach {
+        enabled = false
+    }
 }

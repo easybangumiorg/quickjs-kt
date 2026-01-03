@@ -3,6 +3,8 @@ package com.dokar.quickjs
 import org.gradle.api.Project
 import java.io.File
 import java.util.Properties
+import java.nio.file.Files
+import java.nio.file.Paths
 
 internal fun Project.buildQuickJsNativeLibrary(
     cmakeFile: File,
@@ -35,13 +37,69 @@ internal fun Project.buildQuickJsNativeLibrary(
         return "-DPLATFORM_JAVA_HOME=$home"
     }
 
+    fun findNinja(): String? {
+        // Check NINJA_PATH environment variable first
+        val ninjaPathEnv = System.getenv("NINJA_PATH")
+        if (ninjaPathEnv != null && Files.exists(Paths.get(ninjaPathEnv))) {
+            return ninjaPathEnv
+        }
+
+        // Try common paths first (for macOS with Homebrew)
+        val commonPaths = listOf(
+            "/opt/homebrew/bin/ninja",
+            "/usr/local/bin/ninja",
+            "/usr/bin/ninja",
+        )
+
+        for (path in commonPaths) {
+            if (Files.exists(Paths.get(path))) {
+                return path
+            }
+        }
+
+        // Try to find ninja in PATH
+        val pathEnv = System.getenv("PATH") ?: ""
+        val pathDirs = pathEnv.split(File.pathSeparator)
+        for (dir in pathDirs) {
+            val ninjaPath = Paths.get(dir, "ninja")
+            if (Files.exists(ninjaPath) && Files.isExecutable(ninjaPath)) {
+                return ninjaPath.toString()
+            }
+        }
+
+        return null
+    }
+
+    // Find ninja and add CMAKE_MAKE_PROGRAM if using Ninja generator
+    val ninjaPath = findNinja()
+    val ninjaMakeProgram = if (ninjaPath != null) {
+        "-DCMAKE_MAKE_PROGRAM=$ninjaPath"
+    } else {
+        null
+    }
+
     val generateArgs = if (withJni) {
         when (platform) {
-            Platform.windows_x64 -> commonArgs + ninja + javaHomeArg(windowX64JavaHome())
-            Platform.linux_x64 -> commonArgs + ninja + javaHomeArg(linuxX64JavaHome())
-            Platform.linux_aarch64 -> commonArgs + ninja + javaHomeArg(linuxAarch64JavaHome())
-            Platform.macos_x64 -> commonArgs + ninja + javaHomeArg(macosX64JavaHome())
-            Platform.macos_aarch64 -> commonArgs + ninja + javaHomeArg(macosAarch64JavaHome())
+            Platform.windows_x64 -> {
+                val args = commonArgs + ninja + javaHomeArg(windowX64JavaHome())
+                if (ninjaMakeProgram != null) args + ninjaMakeProgram else args
+            }
+            Platform.linux_x64 -> {
+                val args = commonArgs + ninja + javaHomeArg(linuxX64JavaHome())
+                if (ninjaMakeProgram != null) args + ninjaMakeProgram else args
+            }
+            Platform.linux_aarch64 -> {
+                val args = commonArgs + ninja + javaHomeArg(linuxAarch64JavaHome())
+                if (ninjaMakeProgram != null) args + ninjaMakeProgram else args
+            }
+            Platform.macos_x64 -> {
+                val args = commonArgs + ninja + javaHomeArg(macosX64JavaHome())
+                if (ninjaMakeProgram != null) args + ninjaMakeProgram else args
+            }
+            Platform.macos_aarch64 -> {
+                val args = commonArgs + ninja + javaHomeArg(macosAarch64JavaHome())
+                if (ninjaMakeProgram != null) args + ninjaMakeProgram else args
+            }
             else -> error("Unsupported platform: '$platform'")
         }
     } else {
@@ -50,7 +108,10 @@ internal fun Project.buildQuickJsNativeLibrary(
             Platform.linux_aarch64,
             Platform.linux_x64,
             Platform.macos_aarch64,
-            Platform.macos_x64 -> commonArgs + ninja
+            Platform.macos_x64 -> {
+                val args = commonArgs + ninja
+                if (ninjaMakeProgram != null) args + ninjaMakeProgram else args
+            }
 
             Platform.ios_aarch64,
             Platform.ios_x64,
@@ -70,12 +131,61 @@ internal fun Project.buildQuickJsNativeLibrary(
         else -> arrayOf(commonArgs[1])
     }
 
+    fun findCmake(): String {
+        // Check CMAKE_PATH environment variable first
+        val cmakePathEnv = System.getenv("CMAKE_PATH")
+        if (cmakePathEnv != null && Files.exists(Paths.get(cmakePathEnv))) {
+            return cmakePathEnv
+        }
+        
+        // Try common paths first (for macOS with Homebrew)
+        val commonPaths = listOf(
+            "/opt/homebrew/bin/cmake",
+            "/usr/local/bin/cmake",
+            "/usr/bin/cmake",
+        )
+        
+        for (path in commonPaths) {
+            if (Files.exists(Paths.get(path))) {
+                return path
+            }
+        }
+        
+        // Try to find cmake in PATH
+        val pathEnv = System.getenv("PATH") ?: ""
+        val pathDirs = pathEnv.split(File.pathSeparator)
+        for (dir in pathDirs) {
+            val cmakePath = Paths.get(dir, "cmake")
+            if (Files.exists(cmakePath) && Files.isExecutable(cmakePath)) {
+                return cmakePath.toString()
+            }
+        }
+        
+        error(
+            """
+            Cannot find cmake executable. Please install cmake:
+            - macOS: brew install cmake
+            - Linux: sudo apt-get install cmake (or use your package manager)
+            - Windows: Download from https://cmake.org/download/
+            
+            If cmake is already installed, make sure it's in your PATH or set CMAKE_PATH environment variable.
+            """.trimIndent()
+        )
+    }
+
+
+
     fun runCommand(vararg args: Any) {
+        val cmd = args.toList().toTypedArray()
+        // Replace "cmake" with actual path if it's the first argument
+        if (cmd.isNotEmpty() && cmd[0] == "cmake") {
+            cmd[0] = findCmake()
+        }
         exec {
             workingDir = cmakeFile.parentFile
             standardOutput = System.out
             errorOutput = System.err
-            commandLine(*args)
+            commandLine(*cmd)
         }
     }
 
@@ -110,6 +220,22 @@ internal fun Project.buildQuickJsNativeLibrary(
             "libquickjs.$ext"
         }
         libraryFile.copyTo(File(outDir, destFilename), overwrite = true)
+    }
+
+    // Check if ninja is required but not found
+    val requiresNinja = generateArgs.contains("-G Ninja")
+    if (requiresNinja && ninjaPath == null) {
+        error(
+            """
+            Cannot find ninja executable. Ninja is required for building on this platform.
+            Please install ninja:
+            - macOS: brew install ninja
+            - Linux: sudo apt-get install ninja-build (or use your package manager)
+            - Windows: Download from https://github.com/ninja-build/ninja/releases
+            
+            If ninja is already installed, make sure it's in your PATH or set NINJA_PATH environment variable.
+            """.trimIndent()
+        )
     }
 
     // Generate build files
